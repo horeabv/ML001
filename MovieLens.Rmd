@@ -1,0 +1,644 @@
+---
+title: 'MovieLens - HarvardX: PH125.9x Data Science'
+author: "Horea - Adrian Cioca"
+date: "20/09/2020"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+  word_document: default
+---
+
+---
+####################################################
+# MovieLens Project - A Rating Prediction For Movies
+####################################################
+
+################
+# 1. Introduction
+################
+
+ The purpose of the MovieLens project is to create a recommendation system 
+ which will predict the user rating in order to be able to build a custom taste
+ profile.
+ We will start generating the data sets using the code provided by edx.
+ The edx data set will be used for training our algorithm and the validation 
+ data set to predict movie ratings.
+ RMSE(Root Mean Square Error) will be the indicator used to measure the error 
+ of the model in predicting the rating data.
+ We used linear regression to predict the value of an outcome variable
+ (rating) in base of one or more inputs predictors.
+ To understand the behavior of the variables used in the linear model we used 
+ - Scatter plots to show the liner relationship between the predictor 
+   and response
+ - Box plots to show any outlier observation in the variable
+ - Density plots to show the distribution of the predictor variable like age of the movie, year of production, user id etc. 
+
+###########################
+# 2. Data Setup  
+###########################
+
+#####################################
+## 2.1 Create edx and validation set
+
+
+### Note: this process could take a couple of minutes
+### If you don't have installed already the packages from if statements, 
+### please uncomment them.
+
+## 2.1.1 Data Download
+
+```{r, LoadPackages , echo=FALSE, results='hide'}
+
+#if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+#if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
+#if(!require(data.table)) install.packages("data.table", repos = "http://cran.us.r-project.org")
+#if(!require(sqldf)) install.packages("sqldf", repos = "http://cran.us.r-project.org")
+
+library(tidyr)
+library(caret)
+library(data.table)
+library(dplyr)
+library(broom)
+library(lubridate) 
+library(sqldf)
+library(e1071)
+library(stringr)
+library(stringi)
+
+
+# MovieLens 10M dataset:
+# https://grouplens.org/datasets/movielens/10m/
+# http://files.grouplens.org/datasets/movielens/ml-10m.zip
+```
+#
+```{r, DownloadData, results='hide'}
+dl <- tempfile()
+download.file("http://files.grouplens.org/datasets/movielens/ml-10m.zip", dl)
+
+ratings <- fread(text = gsub("::", "\t", readLines(unzip(dl, "ml-10M100K/ratings.dat"))),
+                 col.names = c("userId", "movieId", "rating", "timestamp"))
+```
+## 2.1.2 Create the Data Set
+```{r, CreateTheDataSet}
+movies <- str_split_fixed(readLines(unzip(dl, "ml-10M100K/movies.dat")), "\\::", 3)
+colnames(movies) <- c("movieId", "title", "genres")
+
+# if using R 3.6 or earlier:
+movies <- as.data.frame(movies) %>% mutate(movieId = as.numeric(levels(movieId))[movieId],
+                                            title = as.character(title),
+                                            genres = as.character(genres))
+# if using R 4.0 or later:
+#movies <- as.data.frame(movies) %>% mutate(movieId = as.numeric(movieId),
+#                                            title = as.character(title),
+#                                            genres = as.character(genres))
+
+
+movielens <- left_join(ratings, movies, by = "movieId")
+```
+## Validation set will be 10% of MovieLens data
+```{r, ValidationSet}
+set.seed(1)
+#set.seed(1, sample.kind="Rounding")
+# if using R 3.5 or earlier, use `set.seed(1)` instead
+test_index <- createDataPartition(y = movielens$rating, times = 1, p = 0.1, list = FALSE)
+# create the train set
+edx <- movielens[-test_index,]
+# create the test set
+temp <- movielens[test_index,]
+```
+## Make sure userId and movieId in validation set are also in edx set
+```{r, IncludeUserIDMovieIDinEDX}
+validation <- temp %>% 
+     semi_join(edx, by = "movieId") %>%
+     semi_join(edx, by = "userId")
+```
+## Add rows removed from validation set back into edx set
+```{r, AddRemovedRowsinEDX}
+removed <- anti_join(temp, validation)
+edx <- rbind(edx, removed)
+
+rm(dl, ratings, movies, test_index, temp, movielens, removed)
+```
+## Validation set will be used just to test the final algorithm
+
+# 3. Analysis
+
+## 3.1 General data analysis :
+```{r edx}
+## Show the structure of edx
+str(edx)
+```
+## We have to check the integrity of the data if we have NAs  we have to remove them
+## So we do check each column 
+```{r DataIntegrity}
+indx <- apply(edx, 2, function(x) any(is.na(x)))
+indx
+```
+## We can see that our data is correct without NAs 
+## The head of the data:
+```{r head}
+head(edx)
+```
+## 3.1.1 The movie with the highest number of ratings
+```{r, MovieWithTheHighestRating}
+MovieIDRatings <-sqldf("select count(rating) as NumbersOfRatings, movieId, title from edx group by movieId, title ")
+head(MovieIDRatings)
+```
+## So Toy Story has the higest number of ratings
+## 3.1.2 A barplot of the ratings per movieId
+```{r, Ratings }
+barplot(MovieIDRatings$NumbersOfRatings)
+```
+## 3.1.3 The average ratings per movieId
+```{r, AverageRatingsPerMovieId}
+ avgMovieID <- mean(MovieIDRatings$NumbersOfRatings)
+ avgMovieID
+```
+## 3.1.4 Genres of Movies
+
+## We want to count the ratings in functions of genres to be able to give a better prediction
+## of the ratings.
+## So first we retrive the distinct genres from the database
+```{r genres}
+genres <- edx$genres %>% str_split(., pattern = "\\|")
+genres <- genres %>% unlist() %>% unique()
+genres
+
+```
+## Then the movie ratings  per genres
+## We use sqldf library 
+```{r ratings} 
+Ratings_per_genres <- sqldf("select count(*) as rating, 'Comedy'     as genres  from edx where genres like '%Comedy%'  union 
+                             select count(*) as rating, 'Romance'     as genres  from edx where genres like '%Romance%' union 
+                             select count(*) as rating, 'Action'      as genres  from edx where genres like '%Action%' union
+                             select count(*) as rating, 'Crime'       as genres  from edx where genres like '%Crime%' union
+                             select count(*) as rating, 'Thriler'     as genres  from edx where genres like '%Thriler%' union
+                             select count(*) as rating, 'Drama'       as genres  from edx where genres like '%Drama%' union
+                             select count(*) as rating, 'SCi-Fi'      as genres  from edx where genres like '%Sci-Fi%' union
+                             select count(*) as rating, 'Adventure'   as genres  from edx where genres like '%Adeventure%' union
+                             select count(*) as rating, 'Children'    as genres  from edx where genres like '%Children%' union
+                             select count(*) as rating, 'Fantasy'     as genres  from edx where genres like '%Fantasy%' union
+                             select count(*) as rating, 'War'         as genres  from edx where genres like '%War%' union
+                             select count(*) as rating, 'Animation'   as genres  from edx where genres like '%Animation%' union
+                             select count(*) as rating, 'Musical'     as genres  from edx where genres like '%Musical%' union
+                             select count(*) as rating, 'Western'     as genres  from edx where genres like '%Western%' union
+                             select count(*) as rating, 'Mystery'     as genres  from edx where genres like '%Mystery%' union
+                             select count(*) as rating, 'Film-Noir'   as genres  from edx where genres like '%Film-Noir%' union
+                             select count(*) as rating, 'Horror'      as genres  from edx where genres like '%Horror%' union
+                             select count(*) as rating, 'Documentary' as genres  from edx where genres like '%Romance%' union
+                             select count(*) as rating, 'IMAX'        as genres  from edx where genres like '%IMAX%' union
+                             select count(*) as rating, 'NoGenres'    as genres  from edx where genres='' or genres is null")
+
+                               
+# Save the data in descending order
+Ratings_per_genres <- sqldf("select *  from Ratings_per_genres order by rating desc" )
+Ratings_per_genres
+
+
+```
+## 3.1.5 A barplot of genres in function of ratinngs:
+```{r genresVsratings}
+ barplot(Ratings_per_genres$rating/1000000, names.arg = Ratings_per_genres$genres, 
+ xlab = "ratings", horiz=TRUE, las=1, col=c(1:10), 
+ desc(Ratings_per_genres$rating/1000000))
+```
+## 3.1.6 A histogram of ratings with the density:
+```{r Ratings_per_genres}
+hist(Ratings_per_genres$rating/1000000, 
+     main="Histogram for Ratings per genres", 
+     xlab="Ratings", 
+     border="blue", 
+     col="green", 
+     xlim=c(0,4), 
+     las=1, 
+     breaks=50, 
+     prob = TRUE)
+
+lines(density(Ratings_per_genres$rating/1000000))
+
+```
+
+
+## 3.1.7 A pie of ratings counts per genres is bellow.
+```{r   echo=FALSE}
+pie(Ratings_per_genres$rating, labels = Ratings_per_genres$genres)
+
+```
+## We can see from the pie chart the first three most rated genres : Drama, Comedy and Action
+## We need also to count the distinct genres, movies and users:
+```{r  echo = FALSE}
+edx %>% summarize(distinct_genres = n_distinct(genres), distinct_movies = n_distinct(movieId), distinct_users = n_distinct(userId))
+```
+## 3.1.8 The mean for all genres
+
+##The mean for all genres and the mean for each genres will give us an overview of the movies ## in terms of the ratings:
+```{r  echo = FALSE}
+#For all genres
+mean_all <- mean(edx$rating)
+mean_all
+```
+## 3.1.9 The mean per gender with histogram 
+```{r echo = FALSE}
+
+
+means    <-           sqldf("select avg(rating) as mean, 'Comedy'      as genres  from edx where genres like '%Comedy%'  union 
+                             select avg(rating) as mean, 'Romance'     as genres  from edx where genres like '%Romance%' union 
+                             select avg(rating) as mean, 'Action'      as genres  from edx where genres like '%Action%' union
+                             select avg(rating) as mean, 'Crime'       as genres  from edx where genres like '%Crime%' union
+                             select avg(rating) as mean, 'Thriler'     as genres  from edx where genres like '%Thriler%' union
+                             select avg(rating) as mean, 'Drama'       as genres  from edx where genres like '%Drama%' union
+                             select avg(rating) as mean, 'SCi-Fi'      as genres  from edx where genres like '%Sci-Fi%' union
+                             select avg(rating) as mean, 'Adventure'   as genres  from edx where genres like '%Adeventure%' union
+                             select avg(rating) as mean, 'Children'    as genres  from edx where genres like '%Children%' union
+                             select avg(rating) as mean, 'Fantasy'     as genres  from edx where genres like '%Fantasy%' union
+                             select avg(rating) as mean, 'War'         as genres  from edx where genres like '%War%' union
+                             select avg(rating) as mean, 'Animation'   as genres  from edx where genres like '%Animation%' union
+                             select avg(rating) as mean, 'Musical'     as genres  from edx where genres like '%Musical%' union
+                             select avg(rating) as mean, 'Western'     as genres  from edx where genres like '%Western%' union
+                             select avg(rating) as mean, 'Mystery'     as genres  from edx where genres like '%Mystery%' union
+                             select avg(rating) as mean, 'Film-Noir'   as genres  from edx where genres like '%Film-Noir%' union
+                             select avg(rating) as mean, 'Horror'      as genres  from edx where genres like '%Horror%' union
+                             select avg(rating) as mean, 'Documentary' as genres  from edx where genres like '%Romance%' union
+                             select avg(rating) as mean, 'IMAX'        as genres  from edx where genres like '%IMAX%' union
+                             select avg(rating) as mean, 'NoGenres'    as genres  from edx where genres='' or genres is null")
+means
+hist(means$mean, 
+     main="Histogram for means per genres", 
+     xlab="means", 
+     border="blue", 
+     col="green", 
+     xlim=c(0,4), 
+     labels = TRUE,
+     #xlabel = genres,
+     las=1, 
+     breaks=50, 
+     prob = TRUE)
+#                    y = c(mean_all, mean_comedy, mean_romance, mean_action, mean_crime, mean_thriler, mean_drama, mean_SCi_Fi, mean_adventure,  #                           mean_children, mean_fantasy,mean_war, mean_animation, mean_musical, mean_western, mean_mystery, mean_film_noir,      #                            mean_horror, mean_documentary, mean_imax, mean_nogenres))
+histogram(means$mean,means$genres)
+
+```
+## 3.1.10 Ratings function of date
+
+## Also we want to know the number of ratings in function of the date
+## So we add a column date in the format yyyy-mm-dd which is a conversion of the timestamp  column
+## The new structure will be as follow: 
+```{r,  echo=FALSE}
+edx <- edx %>% mutate(date = as.Date(as.POSIXct(edx$timestamp, origin="1970-01-01"))) %>% select(userId, movieId, rating, timestamp, date, title, genres)
+#Now we can remove the timestamp column
+edx <- edx %>% select(-timestamp)
+#The new structure:
+str(edx)
+
+```
+## Now we can extract the released year from the title and saved as releasedYear :
+```{r, echo=FALSE}
+#yearMovie <- str_match(edx$title, "\\(\\s*(.*?)\\s*\\)")
+#MovieAge <- yearMovie[ ,2]
+edx <- edx %>% mutate(releasedYear = substr(title, nchar(title) - 4, nchar(title) - 1))
+#Will do the same thing for validation database
+validation <- validation %>% mutate(releasedYear = substr(title, nchar(title) - 4, nchar(title) - 1))
+## New structure of edx
+str(edx)
+```
+## Also the age of the movies will be  calculated in base of the ReleasedYear:
+```{r, echo=FALSE}
+edx <- edx %>% mutate(age = as.numeric( substr(Sys.Date(),1,4)) - as.numeric(releasedYear)) 
+#edx <- edx %>% mutate(age = as.numeric(lubridate::year(edx$date)) - as.numeric(releasedYear)) 
+#Will do the same for validation database
+validation <- validation  %>% mutate(age = as.numeric( substr(Sys.Date(),1,4)) - as.numeric(releasedYear)) 
+#Now edx will look like this:
+str(edx)
+```
+## It's important to have in our analyses the rating year
+## This will be obtain as folow :   
+```{r, echo=FALSE}
+edx <- edx %>%  mutate(., rating_year = year(as_datetime(date)))
+```
+
+## 3.1.11 The minimum , maximum and the mean of the ages of the movies in edx:
+```{r, echo=FALSE}
+ 
+minAge  <- min(edx$age)
+print(minAge)
+maxAge  <- max(edx$age)
+print(maxAge)
+meanAge <- mean(edx$age)
+print(meanAge)
+ #minAge
+ #maxAge
+ #meanAge
+print("For Validation database:")
+minAge_validation  <- min(validation$age)
+print(minAge_validation)
+maxAge_validation  <- max(validation$age)
+print(maxAge_validation)
+meanAge_validation <- mean(validation$age)
+print(meanAge_validation)
+ 
+```
+## 3.1.12 Histogram of ages
+
+## A histogram of ages show us that the highest number of movies from netflix have an age around 24 years:
+```{r, echo=FALSE}
+ #edx %>% ggplot(aes(x = edx$age, y = edx$rating)) + geom_point()
+ggplot(edx, aes(x = edx$age),xlim(100)) + stat_bin(binwidth = 2)
+  geom_histogram()
+```
+## 3.1.13 A plot of ratings and age on validation set
+```{r, echo=FALSE}
+#qplot(edx$rating, edx$age) 
+fit <- validation %>% lm(rating ~ age, data = .)
+coefs <- tidy(fit, conf.int = TRUE)
+coefs
+
+validation %>% mutate(rating_hat = predict(fit, newdata = .)) %>% 
+  ggplot(aes(rating_hat, age, label = movieId)) +
+  geom_point() + 
+  geom_abline()
+  #edx %>% ggplot(., aes(edx$rating, edx$age)) +
+  #geom_point()  +
+  # geom_smooth(method = "lm") + 
+  # coord_cartesian() + 
+  # scale_color_gradient() + 
+  # theme_bw()
+```
+## We will create also for test purpouse a data base with the mouvies age under 
+##  30 edx_30_minus
+```{r, echo=FALSE}
+edx_30_minus <-edx %>% filter(age > 30) 
+str(edx_30_minus)
+```
+##****************************************************************************************************
+## 4 Linear Models Analysis
+## Like methods will be use :
+
+## 4.1  Mean effect model
+```{r, echo=FALSE}
+## on edx database
+mu_hat <- mean(edx$rating)
+mu_hat
+
+## on edx_30_minus database
+mu_hat_30 <- mean(edx_30_minus$rating)
+mu_hat_30
+
+## on validation database
+mu_hat_v <- mean(validation$rating)
+mu_hat_v
+```
+## 4.2 Movie effect model
+
+```{r, echo=FALSE}
+movie_avgs <- edx_30_minus %>% group_by(movieId)# 
+movie_avgs <- movie_avgs %>% summarize(b_i = mean(rating - mu_hat_30))
+qplot(b_i, data = movie_avgs, bins = 100, color = I("blue"))
+```
+```{r, MovieModel, echo=FALSE}
+   predicted_ratings_m <- mu_hat_30 + edx_30_minus %>% left_join(movie_avgs, by='movieId') %>% pull(b_i)
+   
+```
+```{r, MovieAnalyseModel}
+# Scatter plot
+scatter.smooth(x=predicted_ratings_m, y=edx_30_minus$rating, main="edx_30_minus$rating ~ predicted_ratings_m") 
+
+# Box plot
+par(mfrow=c(1, 2))  # divide graph area in 2 columns
+boxplot(predicted_ratings_m, main="Predicted_ratings", sub=paste("Outlier rows: ", boxplot.stats(predicted_ratings_m)$out))  # box plot for 'speed'
+boxplot(edx_30_minus$rating, main="Raiting", sub=paste("Outlier rows: ", boxplot.stats(edx_30_minus$rating)$out))  # box plot for 'distance'
+
+# Density plot
+par(mfrow=c(1, 2))  # divide graph area in 2 columns
+plot(density(predicted_ratings_m), main="Density: Predicted ratings", ylab="Frequency", sub=paste("Skewness:", round(e1071::skewness(predicted_ratings_m), 2)))  # density plot for 'Predicted ratings'
+polygon(density(predicted_ratings_m), col="red")
+plot(density(edx_30_minus$rating), main="Density Plot: Ratings", ylab="Frequency", sub=paste("Skewness:", round(e1071::skewness(edx_30_minus$rating), 2)))  # density plot for 'Ratings'
+polygon(density(edx_30_minus$rating), col="red")
+
+# Correlation coefficient
+print(cor(predicted_ratings_m, edx_30_minus$rating)) 
+```
+## Build the linear model for Movies
+```{r, echo=FALSE}
+ linearModelMovie <- lm(predicted_ratings_m ~ edx_30_minus$rating, data=edx_30_minus)  # build linear regression model for full model
+  
+```
+## Now we can write the linear model formula for Movie Model:
+## predicted_ratings_m <- 2.9085 + 0.2077 * edx_30_minus$rating
+## Now let's print the summary statistic for our model 
+```{r, echo=FALSE}
+summary(lm(predicted_ratings_m ~ edx_30_minus$rating, data = edx_30_minus))  # model summary
+```
+
+
+## 4.3  User effect model
+```{r, echo=FALSE}
+user_avgs <- edx_30_minus %>% group_by(userId)# 
+user_avgs <- user_avgs %>% summarize(b_u = mean(rating))
+qplot(b_u, data = user_avgs, bins = 100, color = I("red"))
+```
+```{r, UserModel, echo=FALSE}
+
+   predicted_ratings_u <- edx_30_minus %>% left_join(user_avgs, by='userId') %>% pull(b_u)
+ 
+```
+```{r, UserDensity}
+#Scatter plot
+scatter.smooth(x=predicted_ratings_u, y=edx_30_minus$rating, main="edx_30_minus$rating ~ predicted_ratings") 
+
+
+#Box plot
+par(mfrow=c(1, 2))  # divide graph area in 2 columns
+boxplot(predicted_ratings_u, main="Predicted_ratings", sub=paste("Outlier rows: ", boxplot.stats(predicted_ratings_u)$out))  # box plot for 'speed'
+boxplot(edx_30_minus$rating, main="Raiting", sub=paste("Outlier rows: ", boxplot.stats(edx_30_minus$rating)$out))  # box plot for 'distance'
+
+
+#Density plot
+par(mfrow=c(1, 2))  # divide graph area in 2 columns
+plot(density(predicted_ratings_u), main="Density: Predicted ratings", ylab="Frequency", sub=paste("Skewness:", round(e1071::skewness(predicted_ratings_u), 2)))  # density plot for 'Predicted ratings'
+polygon(density(predicted_ratings_u), col="red")
+plot(density(edx_30_minus$rating), main="Density Plot: Ratings", ylab="Frequency", sub=paste("Skewness:", round(e1071::skewness(edx_30_minus$rating), 2)))  # density plot for 'Ratings'
+polygon(density(edx_30_minus$rating), col="red")
+
+# Correlation coefficient
+print(cor(predicted_ratings_u, edx_30_minus$rating)) 
+```
+## 4.4  Age effect model
+```{r, echo=FALSE}
+age_avgs <- edx_30_minus %>% group_by(age)# 
+age_avgs <- age_avgs %>% summarize(c_u = mean(rating))
+qplot(c_u, data = age_avgs, bins = 100, color = I("green"))
+```
+```{r, AgeModel, echo=FALSE}
+   
+   predicted_ratings_a <- edx_30_minus %>% left_join(age_avgs, by='age') %>% pull(c_u)
+   
+```
+
+```{r, AgeDensity}
+# Scatter plot
+#Scatter plot
+##scatter.smooth(x=predicted_ratings_a, y=edx_30_minus$rating, main="edx_30_minus$rating ~ predicted_ratings") 
+##Invoking dev.off() to make RStudio open up a new graphics device
+#dev.off()
+par(mar=c(1,1,1,1))
+graphics.off()
+system.time(smoothScatter(predicted_ratings_a, edx_30_minus$rating, nbin = 128))  ## 3.3 seconds
+
+#Box plot
+par(mfrow=c(1, 2))  # divide graph area in 2 columns
+boxplot(predicted_ratings_a, main="Predicted_ratings", sub=paste("Outlier rows: ", boxplot.stats(predicted_ratings_a)$out))  # box plot for 'speed'
+boxplot(edx_30_minus$rating, main="Raiting", sub=paste("Outlier rows: ", boxplot.stats(edx_30_minus$rating)$out))  # box plot for 'distance'
+
+
+#Density plot
+par(mfrow=c(1, 2))  # divide graph area in 2 columns
+plot(density(predicted_ratings_a), main="Density: Predicted ratings", ylab="Frequency", sub=paste("Skewness:", round(e1071::skewness(predicted_ratings_a), 2)))  # density plot for 'Predicted ratings'
+polygon(density(predicted_ratings_a), col="red")
+plot(density(edx_30_minus$rating), main="Density Plot: Ratings", ylab="Frequency", sub=paste("Skewness:", round(e1071::skewness(edx_30_minus$rating), 2)))  # density plot for 'Ratings'
+polygon(density(edx_30_minus$rating), col="red")
+
+# Correlation coefficient
+print(cor(predicted_ratings_a, edx_30_minus$rating)) 
+
+```
+
+
+## 4.5 Movie and user effect model
+```{r, echo=FALSE}
+   ##user_avgs <- edx %>%  
+   ##left_join(movie_avgs, by='movieId') %>%
+   ##group_by(userId) %>%
+   ##summarize(b_u = mean(rating - mu_hat_30 - b_i))
+```
+```{r, echo=FALSE}
+   predicted_ratings_mu <- edx_30_minus %>% left_join(movie_avgs, by='movieId') %>%left_join(user_avgs,    by='userId') %>% mutate(pred = mu_hat + b_i +  b_u) %>% pull(pred)
+   
+```
+
+```{r, MovieUserDensity}
+
+# Scatter plot
+##scatter.smooth(x=predicted_ratings_mu, y=edx_30_minus$rating, main="edx_30_minus$rating ~ predicted_ratings_mu")  
+##dev.off()
+par(mar=c(1,1,1,1))
+graphics.off()
+system.time(smoothScatter(predicted_ratings_mu, edx_30_minus$rating, nbin = 128))
+
+# Box plot
+par(mfrow=c(1, 2))  # divide graph area in 2 columns
+boxplot(predicted_ratings_mu, main="Predicted_ratings", sub=paste("Outlier rows: ", boxplot.stats(predicted_ratings_mu)$out))  # box plot for 'predicted ratings'
+boxplot(edx_30_minus$rating, main="Raiting", sub=paste("Outlier rows: ", boxplot.stats(edx_30_minus$rating)$out))  # box plot for 'rating'
+
+
+# Density plot
+par(mfrow=c(1, 2))  # divide graph area in 2 columns
+plot(density(predicted_ratings_mu), main="Density: Predicted ratings", ylab="Frequency", sub=paste("Skewness:", round(e1071::skewness(predicted_ratings_mu), 2)))  # density plot for 'Predicted ratings'
+polygon(density(predicted_ratings_mu), col="red")
+plot(density(edx_30_minus$rating), main="Density Plot: Ratings", ylab="Frequency", sub=paste("Skewness:", round(e1071::skewness(edx_30_minus$rating), 2)))  # density plot for 'Ratings'
+polygon(density(edx_30_minus$rating), col="red")
+
+print(cor(predicted_ratings_mu, edx_30_minus$rating)) 
+
+
+```
+
+##**********************************************************************************************************
+## 5 RMSE
+
+## 5.1 Residual Mean Square Error(RMSE)
+
+## We will use Residual Mean Square Error(RMSE) to measure accuracy and the typical error.
+## We define a function for RMSE as follow:
+```{r, RMSE}
+ RMSE <- function(actual, predicted){
+   sqrt(mean((actual - predicted)^2))
+   
+ }
+ 
+```
+
+
+## RMSE for Mean effect model:
+```{r, echo=FALSE}
+   mu_rmse <- RMSE(edx_30_minus$rating, mu_hat_30)
+   mu_rmse
+```
+## We save the data in a table named final_results which will be used for conclusions
+```{r, echo=FALSE}
+    #getwd()
+    final_results <- tibble(method_used = "Average", RMSE = mu_rmse)
+    print(final_results) 
+```
+
+## 5.2 RMSE for Movie effect model :
+```{r, echo=FALSE}
+   movie_rmse <- RMSE(predicted_ratings_m, edx_30_minus$rating)
+   movie_rmse
+   ##summary(lm(predicted_ratings_m ~ edx_30_minus$rating, data = edx_30_minus))
+   ##age_lessthan75_rating.lm <- lm(avg_rating_by_age ~ age_of_movie, data = age_of_movie_less_than75)
+   ##summary(age_lessthan75_rating.lm)
+   ###summary(lm(avg_rating_by_age ~ age_of_movie, data = age_between20_and_75))
+   ##summary(lm(avg_rating_by_age ~ age_of_movie, data = age_between20_and_40))
+   ##summary(lm(avg_rating_by_age ~ age_of_movie, data = age_less_than30))
+```
+## Save data in final_results
+```{r, echo=FALSE}
+   final_results <- final_results %>% add_row(method_used = "Movie efect", RMSE = movie_rmse )
+    print(final_results) 
+```
+
+
+## 5.3 RMSE for  User effect model
+```{r, echo=FALSE}
+   
+   user_rmse <- RMSE(predicted_ratings_u, edx_30_minus$rating)
+   
+   user_rmse
+   
+```
+
+## Save data in final_results
+```{r, echo=FALSE}
+   final_results <- final_results %>% add_row(method_used = "User efect", RMSE = user_rmse )
+    print(final_results) 
+```
+
+## 5.4  RMSE for Age effect model
+```{r, echo=FALSE}
+   
+   age_rmse <- RMSE(predicted_ratings_a, edx_30_minus$rating)
+   
+   age_rmse
+   
+```
+
+```{r, echo=FALSE}
+   final_results <- final_results %>% add_row(method_used = "age efect", RMSE = age_rmse )
+    print(final_results) 
+```
+
+## 4.5 RMSE for Movie and user effect model
+
+```{r, echo=FALSE}
+
+   movie_user_rmse <- RMSE(predicted_ratings_mu , edx_30_minus$rating)
+   
+   movie_user_rmse
+```
+
+```{r, echo=FALSE}
+   final_results <- final_results %>% add_row(method_used = "Movie and user efect", RMSE = movie_user_rmse )
+    print(final_results) 
+```
+
+## We can see that RMSE is the same with Residual standard error return by  lm function: 0.8653 
+
+## 6 Results
+
+## 9) Regularisation
+
+## Conclusion
+
+
+
+
